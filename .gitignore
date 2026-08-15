@@ -1,0 +1,27 @@
+# --- secrets: this repo is public, keep it that way -------------------------
+.env
+.env.local
+*.key
+credentials.json
+
+# --- python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# --- os ---------------------------------------------------------------------
+.DS_Store
+
+# --- agent output -----------------------------------------------------------
+# Live run logs. One representative run is committed under examples/ so a
+# reviewer can read a full audit trail without executing anything.
+runs/
+
+# NOTE: cassettes/ is deliberately NOT ignored. The recorded HTTP responses are
+# what let a reviewer replay a complete run offline, with no API key and no
+# network. They are part of the deliverable, not build noise.
