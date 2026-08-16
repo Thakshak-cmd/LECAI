@@ -80,11 +80,17 @@ def build_benign() -> list[dict]:
         ]
         ordinary = [p for p in postings if p not in ai_talk and p not in imperatives]
 
-        chosen = (
-            ai_talk[:14]
-            + imperatives[:10]
-            + rng.sample(ordinary, min(16, len(ordinary)))
-        )
+        # De-duplicate by ref. A posting can be both "talks about AI" and
+        # "contains application imperatives", and the earlier version added it
+        # once per bucket -- which double-counted it in the eval totals and
+        # made one listing look like two independent results.
+        chosen: list = []
+        seen: set[str] = set()
+        for p in ai_talk[:14] + imperatives[:10] + rng.sample(ordinary, min(16, len(ordinary))):
+            if p.ref in seen:
+                continue
+            seen.add(p.ref)
+            chosen.append(p)
 
         for p in chosen:
             reason = (

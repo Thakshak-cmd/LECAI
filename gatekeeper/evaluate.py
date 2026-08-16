@@ -199,11 +199,25 @@ def run_eval(console: Console, *, use_llm: bool = False, budget: int = 40) -> in
             console.print(f"    [dim]{r.note[:150]}[/dim]")
 
     # -- how much of the corpus needed the model at all ----------------------
-    ambiguous = [r for r in rows if "llm" in r.decided_by]
+    reached_model = [r for r in rows if "llm" in r.decided_by]
+    failed = [r for r in rows if "unavailable" in r.decided_by or "llm failed" in r.decided_by]
     console.print(
-        f"\n{len(rows) - len(ambiguous)}/{len(rows)} item(s) were settled by rules alone "
-        f"at zero cost; {len(ambiguous)} reached the model tier."
+        f"\n{len(rows) - len(reached_model) - len(failed)}/{len(rows)} item(s) were settled by "
+        f"rules alone at zero cost; {len(reached_model)} reached the model tier."
     )
+
+    # Without this line the recall figure above is uninterpretable: a run where
+    # most samples failed has not measured the blind spot, it has only failed
+    # to look at it. Free-tier rate limits make that the common case, so the
+    # number has to be printed rather than inferred.
+    if failed:
+        console.print(
+            f"[yellow]{len(failed)} model call(s) failed[/yellow] "
+            f"(quota, network, or a retired model id). Those items kept their rules verdict, "
+            f"so the recall figure above is a [bold]lower bound[/bold] on the hybrid and the "
+            f"false-negative rate is unmeasured for them. Re-run with a smaller corpus or a "
+            f"higher budget for a clean number."
+        )
 
     if not fp and not fn:
         console.print("\n[green]Clean sweep on this corpus.[/green] "

@@ -19,10 +19,19 @@ The asymmetry in what the model is allowed to change is deliberate:
 * it **never sees** an item the rules already called at ≥ 70, so a persuasive
   payload cannot talk its way out of a verdict that was reached from structure.
 
-Every failure mode lands on FLAG rather than ACT. No key, no budget, HTTP
-error, unparseable response, low confidence -- all of them stop the item and
-hand it to a human. The agent is allowed to be unhelpful; it is not allowed to
-act on something it did not manage to check.
+**In the ambiguous band, every failure mode lands on FLAG rather than ACT.** No
+key, no budget, HTTP error, unparseable response, low confidence -- all of them
+stop the item and hand it to a human. The agent is allowed to be unhelpful; it
+is not allowed to act on something it did not manage to check.
+
+The audit-sample path is the one deliberate exception, and it is worth being
+precise about why. There, the rules found nothing and the model call is an
+*extra* check on an already-cleared item. If that call fails, flagging would
+make the verdict depend on whether the network held rather than on the content
+-- an identical unsampled item would sail through, and a rate limit would turn
+a clean run into a wall of false flags. So the item keeps the verdict it
+earned, and the log records that the sample is missing. The failure is
+reported as a gap in *measurement*, never as evidence about the item.
 """
 
 from __future__ import annotations
@@ -33,6 +42,20 @@ from gatekeeper.screening.verdicts import Action, Finding, Screening, Verdict
 
 #: Below this, the model is not trusted to clear an item the rules doubted.
 CLEAR_CONFIDENCE = 0.7
+
+
+def _informational_veto(quote: str) -> str | None:
+    """Is the model objecting to content the rules already know is benign?
+
+    Returns the name of the matching informational detector, or None. See the
+    long comment at the call site for the measurement that motivated this.
+    """
+    if not quote or not quote.strip():
+        return None
+    for detector in rules.INFORMATIONAL:
+        if detector.pattern.search(quote):
+            return detector.code
+    return None
 
 
 def screen(
@@ -104,9 +127,12 @@ def screen(
         # adding more patterns, because the whole class is defined by not
         # matching any.
         #
-        # The audit sample is the answer: spend a model call on a *cleared*
+        # The audit sample is the mitigation: spend a model call on a *cleared*
         # item to find out what the rules are missing. It is how the run
         # measures its own false-negative rate instead of assuming it is zero.
+        # Measured on the corpus, it recovers all three subtle attacks the
+        # rules tier scores at 0 -- but only when the call actually succeeds,
+        # which is why the failure path below is written the way it is.
         can_sample = (
             audit_sample
             and allow_llm
@@ -134,6 +160,49 @@ def screen(
             text=visible or hidden,
             rules_summary=f"score {report.score}/100 — no pattern fired; this is an audit sample of a cleared item",
         )
+
+        # A failed sample is not a suspicious item -- it is a missing
+        # measurement, and the two must not be conflated in either direction.
+        #
+        # Flagging here would be incoherent: an identical item that simply was
+        # not sampled is cleared, so flagging this one would make the verdict
+        # depend on whether the network held rather than on the content. Under
+        # a rate limit that turns a clean run into a wall of false flags.
+        #
+        # But silently returning "cleared, and the model agreed" is worse, and
+        # is the bug this replaces: the log asserted corroboration that was
+        # never obtained. So the item keeps exactly the verdict it had earned
+        # on its own -- and the log says, in as many words, that the second
+        # opinion is missing.
+        if not opinion.ok:
+            findings.append(
+                Finding(
+                    "audit_sample_failed",
+                    (
+                        f"audit sample could not be taken ({opinion.error}). The rules verdict "
+                        f"stands unchanged, because a failed measurement is not evidence about "
+                        f"this item. What it does mean is that this run's false-negative rate "
+                        f"is UNMEASURED, not zero"
+                    ),
+                    where="structured",
+                )
+            )
+            return Screening(
+                ref=ref,
+                verdict=Verdict.DATA,
+                action=Action.ACT,
+                score=report.score,
+                findings=findings,
+                decided_by="rules (audit sample unavailable)",
+                rationale=(
+                    f"Rules scored {report.score} and cleared this item. An audit sample was "
+                    f"attempted and failed ({opinion.error}), so no second opinion was obtained. "
+                    f"The item is treated exactly as any other rules-cleared item — no better, "
+                    f"no worse. Note that a run with failed samples has not verified its own "
+                    f"blind spot."
+                ),
+            )
+
         findings.append(
             Finding(
                 "audit_sample",
@@ -146,7 +215,60 @@ def screen(
             )
         )
 
-        if opinion.ok and opinion.verdict in {"INSTRUCTION", "SUSPICIOUS"} and opinion.confidence >= CLEAR_CONFIDENCE:
+        # Positive identification beats general suspicion.
+        #
+        # Measured: the adjudicator flags RemoteOK's anti-bot canary ("mention
+        # the word CAJOLE ... to show you read the job post") as prompt
+        # injection, and does so *inconsistently* -- across four real postings
+        # carrying the identical canary it returned INSTRUCTION at 0.95 for
+        # one, SUSPICIOUS at 0.95 for another, and DATA at 0.95-1.00 for the
+        # other two, correctly describing it as "a typical attention check" in
+        # the last case. Same pattern, opposite verdicts, high confidence
+        # either way. That alone drove hybrid precision from 1.000 to 0.750 on
+        # real postings.
+        #
+        # The rules tier already knows what that string is, deterministically,
+        # every time. Where a detector has *positively identified* content as a
+        # known benign human-directed instruction, that beats the model's
+        # guess-from-priors -- so if the span the model is objecting to is
+        # exactly such content, the escalation is refused and the disagreement
+        # is logged rather than hidden.
+        #
+        # Deliberately narrow: it only applies when the model's own quote
+        # matches an informational pattern. A posting carrying both a canary
+        # and a real payload still escalates, because the model would quote the
+        # payload instead.
+        vetoed_by = _informational_veto(opinion.quote)
+        if vetoed_by and opinion.verdict in {"INSTRUCTION", "SUSPICIOUS"}:
+            findings.append(
+                Finding(
+                    "rules_override_llm",
+                    (
+                        f"adjudicator said {opinion.verdict} at {opinion.confidence:.2f}, but the "
+                        f"span it quoted matches '{vetoed_by}' — content the rules tier has "
+                        f"positively identified as a benign instruction aimed at human "
+                        f"applicants. A specific identification outranks a general suspicion, "
+                        f"so the escalation is refused. Quoted: {opinion.quote[:120]!r}"
+                    ),
+                    where="structured",
+                )
+            )
+            return Screening(
+                ref=ref,
+                verdict=Verdict.DATA,
+                action=Action.ACT,
+                score=report.score,
+                findings=findings,
+                decided_by="rules+llm (rules overrode the model)",
+                rationale=(
+                    f"The audit sample disagreed with the rules, and the rules won. The model "
+                    f"objected to a known anti-bot canary — a real instruction, aimed at humans, "
+                    f"placed there by the job board itself. The disagreement is recorded above "
+                    f"rather than resolved silently."
+                ),
+            )
+
+        if opinion.verdict in {"INSTRUCTION", "SUSPICIOUS"} and opinion.confidence >= CLEAR_CONFIDENCE:
             hostile = Verdict.INSTRUCTION if opinion.verdict == "INSTRUCTION" else Verdict.SUSPICIOUS
             return Screening(
                 ref=ref,

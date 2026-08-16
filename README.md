@@ -12,7 +12,7 @@ make install
 make replay      # full run, no network, no API key
 make verify      # re-hash the audit log and check the chain
 make eval        # precision/recall against the labelled corpus
-make test        # 54 tests, offline, <1s
+make test        # 69 tests, offline, <1s
 ```
 
 ### 📖 Start here: [examples/DECISION-TRAIL.md](examples/DECISION-TRAIL.md)
@@ -27,7 +27,7 @@ whether the reasoning is sound.
 | Requirement | Where | In short |
 | --- | --- | --- |
 | **Two+ external sources, no auth** | [`sources/`](gatekeeper/sources/) | RemoteOK + Arbeitnow (JSON APIs), plus Hacker News fetched **on demand**. No key, no account. |
-| **Classify each item, log the reasoning** | [`screening/`](gatekeeper/screening/) | Every item gets DATA / INSTRUCTION / SUSPICIOUS with per-finding evidence — `(code, detail, weight, channel)` — and a stated rationale. Measured: **precision 1.000** against 70 real postings. |
+| **Classify each item, log the reasoning** | [`screening/`](gatekeeper/screening/) | Every item gets DATA / INSTRUCTION / SUSPICIOUS with per-finding evidence — `(code, detail, weight, channel)` — and a stated rationale. Measured: **precision 1.000** against 68 real postings. |
 | **Multi-step, not a fixed script** | [`planner.py`](gatekeeper/planner.py) | Source trust falls during the run and triggers **re-screening of already-cleared items**; the second board is fetched only if the first falls short; external lookups are bought selectively. [Asserted in tests.](tests/test_planner.py) |
 
 What one run produces:
@@ -159,12 +159,23 @@ per *field* — one Arbeitnow record holds a schema-constrained `remote` boolean
 and free prose typed by the poster, and treating those alike is the bug the
 wrapper exists to prevent.
 
-**2. Screening — is this safe to act on?** Rules score the extremes for free.
-Only the ambiguous middle (25–69) costs a model call. The model **may escalate
-at any confidence but may only clear at ≥ 0.7**, and never sees an item the
-rules already convicted at ≥ 70 — so a persuasive payload cannot argue its way
-out of a verdict reached from structure. Every failure — no key, no budget,
-bad JSON, low confidence — lands on FLAG, never ACT.
+**2. Screening — is this safe to act on?** Rules score the extremes for free;
+only the ambiguous middle (25–69) costs a model call. What the model is allowed
+to do is asymmetric on purpose:
+
+- in the ambiguous band it **may escalate at any confidence, but may only clear
+  at ≥ 0.7** — clearing is the direction that lets content through;
+- it **never sees** an item the rules convicted at ≥ 70, so a persuasive payload
+  cannot argue its way out of a verdict reached from structure;
+- when sampling an item the rules *cleared*, it needs ≥ 0.7 to escalate too —
+  and **loses outright** to a detector that has positively identified the
+  quoted span as benign (see the canary measurement below).
+
+In the ambiguous band every failure — no key, no budget, bad JSON, low
+confidence — lands on FLAG, never ACT. The audit-sample path is the one
+deliberate exception: a failed sample leaves the rules verdict standing and is
+logged as a *missing measurement*, because flagging there would make the
+verdict depend on whether the network held rather than on the content.
 
 **3. Consistency — is this coherent?** Independent of injection. Structured
 fields versus prose (`remote: true` + "five days in our Berlin office"),
@@ -217,11 +228,11 @@ the only way to tell a decision from a rationalisation.
 
 ```
 $ make eval
-corpus: 70 real benign postings, 13 synthetic attacks
+corpus: 68 real benign postings, 13 synthetic attacks
 
                   │ predicted hostile │ predicted benign
  actually hostile │        10         │        3
- actually benign  │         0         │       70
+ actually benign  │         0         │       68
 
 precision 1.000   recall 0.769   F1 0.870
 ```
@@ -240,11 +251,55 @@ the subtle set: polite, plausible English with no trigger vocabulary at all.
 
 Scores 0. No pattern can catch that class, because the class is *defined* by
 matching no pattern. That is the structural limit of a rules tier, and adding
-patterns cannot fix it. The answer is the **audit sample**: spend a model call
-on items the rules *cleared*, so the run measures its own false-negative rate
-instead of assuming it is zero. Implemented in
-[`classify.py`](gatekeeper/screening/classify.py); `make eval` with a key
-exercises it.
+patterns cannot fix it. The mitigation is the **audit sample**: spend a model
+call on items the rules *cleared*, so the run measures its own false-negative
+rate instead of assuming it is zero.
+
+### What happened when I actually measured the hybrid
+
+Turning the model tier on the first time made the system **worse**, and finding
+out why produced the most useful result in this project. Measured on 25 items
+(all 13 attacks + 12 real postings), with every call succeeding:
+
+| | precision | recall |
+| --- | --- | --- |
+| rules only | **1.000** | 0.769 |
+| + audit sample | 0.750 | **0.923** |
+| + rules veto | **1.000** | **0.923** |
+
+The audit sample recovered all three subtle attacks — and wrongly rejected four
+real job postings. Every one of those four was the model flagging **RemoteOK's
+anti-bot canary** as prompt injection, *inconsistently*. Four real postings, the
+identical canary, high confidence each time:
+
+```
+1136584  INSTRUCTION 0.95  "classic prompt injection pattern"
+1136543  SUSPICIOUS  0.95  "designed to manipulate the application process"
+1136369  DATA        1.00  "typical attention check used to filter automated applications"
+1136373  DATA        0.95  "an anti-spam instruction directed at human applicants"
+```
+
+Same string, opposite verdicts. The rules tier gets it right deterministically
+every time, because it has been *told* what that string is.
+
+So the fix is a principle rather than a threshold: **a positive identification
+beats a general suspicion.** When the span the model quotes matches a detector
+that has positively identified it as benign human-directed content, the
+escalation is refused and the disagreement is logged. It is deliberately
+narrow — a posting carrying both a canary *and* a payload still escalates,
+because the model quotes the payload instead. Both behaviours are pinned by
+tests.
+
+**Remaining miss:** `adv:obfuscated-quiet` — hidden keyword-stuffing with no
+directive. The rules score it into the ambiguous band on concealment alone;
+the model then clears it as harmless. That is a real disagreement about whether
+concealment is *itself* disqualifying. I think it is, and the model does not.
+Unresolved, and left visible rather than tuned away.
+
+**Reproducibility caveat:** the full 81-item hybrid eval exceeds free-tier rate
+limits — about 56 of 81 calls return 429. `make eval --llm` now prints how many
+calls failed and states that recall is a lower bound, because a run whose
+samples failed has not measured its blind spot, it has only failed to look.
 
 ---
 
@@ -321,16 +376,18 @@ signature.
 
 Honest list, roughly in order of what I'd actually reach for.
 
-- **Verify the LLM tier end to end.** The rules tier, planner, consistency
-  layer and audit log are exercised by tests and by every run in `examples/`.
-  The tier-2 adjudicator and the audit-sample path are written and wired but
-  have **not been run against a live model** — I built this without a key
-  configured. The code fails closed if the call fails, so a broken key
-  degrades to rules-only rather than to false confidence, but "fails safely
-  when untested" is not the same as "tested". This is the first thing I'd fix.
-- **Make the audit sample adaptive.** Right now sampling is all-or-nothing in
-  eval. It should sample a rate derived from how much budget is left and how
-  much the rules tier has been missing lately.
+- **Resolve the concealment disagreement.** `adv:obfuscated-quiet` is still
+  missed: the rules flag hidden keyword-stuffing on concealment alone, and the
+  model clears it. Deciding whether concealment is *by itself* disqualifying is
+  a policy question I have not settled, and it should not stay unsettled.
+- **Make the audit sample adaptive.** Sampling is all-or-nothing in eval. It
+  should sample a rate derived from remaining budget and how much the rules
+  tier has been missing lately — and it needs throttling, since the free tier
+  429s well before a full corpus is sampled.
+- **Widen the veto carefully.** The rules-beat-model veto currently keys off
+  the informational detectors only. That is the right *shape*, but the general
+  version — a model that must justify overriding a positive identification —
+  needs more evidence than four postings before I would trust it further.
 - **Attack the classifier properly.** The subtle set is three examples I wrote
   in ten minutes. A real adversarial pass — paraphrase, translate, split
   payloads across fields — would find more, and the honest expectation is that
@@ -361,7 +418,7 @@ gatekeeper/
   planner.py         the agent loop
   audit/log.py       hash-chained JSONL
   evaluate.py        precision/recall harness
-corpus/              70 real benign + 13 labelled synthetic attacks
+corpus/              68 real benign + 13 labelled synthetic attacks
 cassettes/           recorded HTTP, so runs are reproducible offline
 examples/            two committed audit logs
 ```

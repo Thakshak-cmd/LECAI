@@ -23,7 +23,15 @@ load_dotenv()
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-DEFAULT_MODEL = "gemini-2.5-flash-lite"
+#: Verified against the live API on 2026-08-16 with a free-tier key.
+#:
+#: The previous default, `gemini-2.5-flash-lite`, still appears in the
+#: ListModels response but returns HTTP 404 for new keys: "no longer available
+#: to new users". That combination is nastier than a plain removal, because
+#: discovery says the model exists and only the call fails -- so the failure
+#: surfaces at adjudication time, one item at a time, rather than at startup.
+#: `gatekeeper eval --llm` will say so plainly if this ever goes stale again.
+DEFAULT_MODEL = "gemini-3.5-flash-lite"
 
 GEMINI_ENDPOINT = (
     "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
