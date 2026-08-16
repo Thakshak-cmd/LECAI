@@ -87,9 +87,17 @@ class Fetcher:
         if self.mode is not Mode.RECORD and path.exists():
             response = self._replay(path)
         elif self.mode is Mode.REPLAY:
+            # Deliberately repo-relative. This message ends up inside audit
+            # logs that get committed and read by other people, and an
+            # absolute path leaks the author's home directory into a public
+            # artefact while telling the reader nothing useful.
+            try:
+                shown = path.relative_to(Path.cwd())
+            except ValueError:
+                shown = Path(*path.parts[-2:])
             raise CassetteMiss(
                 f"No cassette for {url}\n"
-                f"  expected at: {path}\n"
+                f"  expected at: {shown}\n"
                 f"  run `make record` (needs network) to create it."
             )
         else:

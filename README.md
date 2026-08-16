@@ -15,6 +15,38 @@ make eval        # precision/recall against the labelled corpus
 make test        # 54 tests, offline, <1s
 ```
 
+### 📖 Start here: [examples/DECISION-TRAIL.md](examples/DECISION-TRAIL.md)
+
+Five complete decision trails, rendered from the committed logs — including a
+**real instruction the agent found in live API data**, and the agent revising
+conclusions it had already reached. That file is the fastest way to judge
+whether the reasoning is sound.
+
+### How this maps to the brief
+
+| Requirement | Where | In short |
+| --- | --- | --- |
+| **Two+ external sources, no auth** | [`sources/`](gatekeeper/sources/) | RemoteOK + Arbeitnow (JSON APIs), plus Hacker News fetched **on demand**. No key, no account. |
+| **Classify each item, log the reasoning** | [`screening/`](gatekeeper/screening/) | Every item gets DATA / INSTRUCTION / SUSPICIOUS with per-finding evidence — `(code, detail, weight, channel)` — and a stated rationale. Measured: **precision 1.000** against 70 real postings. |
+| **Multi-step, not a fixed script** | [`planner.py`](gatekeeper/planner.py) | Source trust falls during the run and triggers **re-screening of already-cleared items**; the second board is fetched only if the first falls short; external lookups are bought selectively. [Asserted in tests.](tests/test_planner.py) |
+
+What one run produces:
+
+```
+$ make replay
+                       Triage outcome
+┏━━━━━━━━┳━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Action ┃   n ┃ Meaning                                    ┃
+┡━━━━━━━━╇━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ ACT    │  24 │ shortlisted: safe, coherent, and relevant  │
+│ IGNORE │ 168 │ safe but not a match for the profile       │
+│ FLAG   │   8 │ held for a human: unverified or incoherent │
+│ REJECT │   1 │ hostile content; quarantined               │
+└────────┴─────┴────────────────────────────────────────────┘
+
+Audit log: runs/20260816T…Z.jsonl   (1,029 events, chain intact)
+```
+
 ---
 
 ## What it actually does
@@ -31,13 +63,17 @@ can read without an account.
 *Job data from [RemoteOK](https://remoteok.com), as their API terms request —
 see below for why that line is the most interesting thing in this repo.*
 
-Every run produces a hash-chained JSONL audit log. Two are committed under
-[`examples/`](examples/) so you can read a full decision trail without running
-anything:
+Every run produces a hash-chained JSONL audit log. Two full runs are committed
+under [`examples/`](examples/) — 1,029 and 470 events — alongside
+[`DECISION-TRAIL.md`](examples/DECISION-TRAIL.md), which renders the
+interesting parts as readable prose. The JSONL is the machine record; the
+Markdown is the human view, generated from it by
+[`tools/render_trail.py`](tools/render_trail.py) rather than written by hand.
 
 ```bash
-gatekeeper log examples/run-live-data-only.jsonl --kind PLAN --quiet
 gatekeeper log examples/run-live-data-only.jsonl --ref remoteok:0
+gatekeeper log examples/run-live-data-only.jsonl --kind PLAN --quiet
+gatekeeper verify examples/run-live-data-only.jsonl
 ```
 
 ---
